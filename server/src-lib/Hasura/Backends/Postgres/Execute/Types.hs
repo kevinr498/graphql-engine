@@ -204,14 +204,11 @@ mkTxErrorHandler isExpectedError txe = fromMaybe unexpectedError expectedError
             _ -> message
 
 data ConnectionTemplateConfig
-  = -- | Connection templates are disabled for Hasura CE
-    ConnTemplate_NotApplicable
-  | ConnTemplate_NotConfigured
+  = ConnTemplate_NotConfigured
   | ConnTemplate_Resolver Kriti.ValueExt ConnectionTemplateResolver
 
 connectionTemplateConfigResolver :: ConnectionTemplateConfig -> Maybe ConnectionTemplateResolver
 connectionTemplateConfigResolver = \case
-  ConnTemplate_NotApplicable -> Nothing
   ConnTemplate_NotConfigured -> Nothing
   ConnTemplate_Resolver _template resolver -> Just resolver
 
@@ -335,18 +332,15 @@ pgResolveConnectionTemplate sourceConfig (RequestContext (RequestContextHeaders 
     case connectionTemplateMaybe of
       Nothing ->
         case _pscConnectionTemplateConfig sourceConfig of
-          ConnTemplate_NotApplicable -> connectionTemplateNotApplicableError
           ConnTemplate_NotConfigured ->
             throw400 TemplateResolutionFailed "Connection template not defined for the source"
           ConnTemplate_Resolver _template resolver ->
             pure resolver
       Just connectionTemplate ->
         case _pscConnectionTemplateConfig sourceConfig of
-          -- connection template is an enterprise edition only feature. `ConnTemplate_NotApplicable` error is thrown
-          -- when community edition engine is used to test the connection template
-          ConnTemplate_NotApplicable -> connectionTemplateNotApplicableError
-          _ -> pure $ ConnectionTemplateResolver $ \sessionVariables' reqHeaders queryContext' ->
+          ConnTemplate_NotConfigured -> pure $ ConnectionTemplateResolver $ \sessionVariables' reqHeaders queryContext' ->
             resolvePostgresConnectionTemplate connectionTemplate (Map.keys (_pscConnectionSet sourceConfig)) sessionVariables' reqHeaders queryContext'
+          ConnTemplate_Resolver _template resolver -> pure resolver
   let headers = map (\(hName, hVal) -> (CI.mk (txtToBs hName), txtToBs hVal)) $ Map.toList headersMap
   case maybeRoleFromSessionVariables sessionVariables of
     Nothing -> throw400 InvalidParams "No `x-hasura-role` found in session variables. Please try again with non-admin 'x-hasura-role' in the session context."
@@ -382,7 +376,6 @@ sourceConfigNumReadReplicas =
 sourceConfigConnectonTemplate :: PGSourceConfig -> Maybe Kriti.ValueExt
 sourceConfigConnectonTemplate pgSourceConfig =
   case _pscConnectionTemplateConfig pgSourceConfig of
-    ConnTemplate_NotApplicable -> Nothing
     ConnTemplate_NotConfigured -> Nothing
     ConnTemplate_Resolver template _ -> Just template
 

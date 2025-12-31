@@ -1,0 +1,28 @@
+{
+  "type": "pg_add_source",
+  "args": {
+    "name": "multi_tenant_postgres",
+    "configuration": {
+      "connection_info": {
+        "database_url": "postgresql://postgres:password@localhost:5432/default_db"
+      },
+      "connection_template": {
+        "template": "{{ if (request.headers[\"x-tenant-id\"]) }} { \"connection_set\": \"tenant_{{ request.headers[\"x-tenant-id\"] }}\" } {{ else }} { \"default\": true } {{ endif }}"
+      },
+      "connection_set": [
+        {
+          "name": "tenant_a",
+          "connection_info": {
+            "database_url": "postgresql://postgres:password@localhost:5432/tenant_a_db"
+          }
+        },
+        {
+          "name": "tenant_b",
+          "connection_info": {
+            "database_url": "postgresql://postgres:password@localhost:5432/tenant_b_db"
+          }
+        }
+      ]
+    }
+  }
+}

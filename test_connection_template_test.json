@@ -1,0 +1,14 @@
+{
+  "type": "pg_test_connection_template",
+  "args": {
+    "source_name": "multi_tenant_postgres",
+    "request_context": {
+      "headers": {"x-tenant-id": "tenant_a"},
+      "session_variables": {"x-hasura-role": "user"},
+      "query": null
+    },
+    "connection_template": {
+      "template": "{{ if (request.headers[\"x-tenant-id\"]) }} { \"connection_set\": \"tenant_{{ request.headers[\"x-tenant-id\"] }}\" } {{ else }} { \"default\": true } {{ endif }}"
+    }
+  }
+}

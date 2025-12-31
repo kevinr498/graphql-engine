@@ -91,7 +91,12 @@ import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Authentication.User (ExtraUserInfo (..), UserInfo (..))
 import Hasura.Backends.MSSQL.Connection
 import Hasura.Backends.Postgres.Connection
+import Hasura.Backends.Postgres.Connection.Settings (ConnectionTemplate (..), PostgresConnectionSet, getPostgresConnectionSet)
+import Hasura.Backends.Postgres.Execute.ConnectionTemplate (resolvePostgresConnectionTemplate)
+import Hasura.Backends.Postgres.Execute.Types (ConnectionTemplateConfig (..), ConnectionTemplateResolver (..))
 import Hasura.Base.Error
+import Kriti.Eval qualified as Kriti
+import Data.Map.Strict qualified as Map
 import Hasura.ClientCredentials (getEEClientCredentialsTx, setEEClientCredentialsTx)
 import Hasura.Eventing.Backend
 import Hasura.Eventing.Common
@@ -1510,6 +1515,26 @@ telemetryNotice =
     <> "usage stats which allows us to keep improving Hasura at warp speed. "
     <> "To read more or opt-out, visit https://hasura.io/docs/latest/graphql/core/guides/telemetry.html"
 
+-- | Build connection template configuration from metadata (CE version)
+buildConnectionTemplateConfig :: 
+  Maybe ConnectionTemplate -> 
+  Maybe PostgresConnectionSet -> 
+  IO ConnectionTemplateConfig
+buildConnectionTemplateConfig Nothing _ = pure ConnTemplate_NotConfigured
+buildConnectionTemplateConfig (Just template) connectionSetMaybe = do
+  let connectionSetKeys = maybe mempty (Map.keys . getPostgresConnectionSet) connectionSetMaybe
+  pure $ ConnTemplate_Resolver 
+    (templateToKritiValue template) 
+    (ConnectionTemplateResolver $ \sessionVars headers queryCtx ->
+      resolvePostgresConnectionTemplate template connectionSetKeys sessionVars headers queryCtx)
+  where
+    -- Convert ConnectionTemplate to Kriti ValueExt (simplified for CE)
+    templateToKritiValue :: ConnectionTemplate -> Kriti.ValueExt
+    templateToKritiValue (ConnectionTemplate templateText) = 
+      case Kriti.parser templateText of
+        Right kritiValue -> kritiValue
+        Left _ -> Kriti.ValueExt mempty -- Fallback to empty template on parse error
+
 mkPgSourceResolver :: PG.PGLogger -> SourceResolver ('Postgres 'Vanilla)
 mkPgSourceResolver pgLogger env sourceName config = runExceptT do
   let PostgresSourceConnInfo urlConf poolSettings allowPrepare isoLevel _ = pccConnectionInfo config
@@ -1529,7 +1554,9 @@ mkPgSourceResolver pgLogger env sourceName config = runExceptT do
   pgPool <- liftIO $ Q.initPGPool connInfo context connParams pgLogger
   let pgExecCtx = mkPGExecCtx isoLevel pgPool NeverResizePool
   connInfoWithFinalizer <- liftIO $ mkConnInfoWithFinalizer connInfo (pure ())
-  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer Nothing mempty (pccExtensionsSchema config) mempty ConnTemplate_NotApplicable
+  -- Build connection template config from metadata
+  connectionTemplateConfig <- liftIO $ buildConnectionTemplateConfig (pccConnectionTemplate config) (pccConnectionSet config)
+  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer Nothing mempty (pccExtensionsSchema config) mempty connectionTemplateConfig
 
 mkMSSQLSourceResolver :: SourceResolver 'MSSQL
 mkMSSQLSourceResolver env _name (MSSQLConnConfiguration connInfo _) = runExceptT do

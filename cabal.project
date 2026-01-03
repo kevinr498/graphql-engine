@@ -1,5 +1,4 @@
 -- Global project configuration.
-
 --
 -- This file can be overridden with cabal.project.local (see e.g. cabal/dev.project)
 --

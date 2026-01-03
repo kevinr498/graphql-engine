@@ -109,3 +109,53 @@ All **other contents** in the v2 folder (except those in [`server`](v2/server), 
 [`console`](v2/console) directories) are available under the [MIT License](LICENSE-community).
 This includes everything in the [`docs`](v2/docs) and [`community`](v2/community)
 directories.
+
+
+### 
+BUILDING AGILE HASURA
+###
+
+alias cabal-linux-amd='docker run --rm -it \
+  --platform=linux/amd64 \
+  -v "$PWD:/work" \
+  -v "$HOME/.cabal:/root/.cabal" \
+  -v "$HOME/.ghc:/root/.ghc" \
+  -v "$HOME/.cache:/root/.cache" \
+  -w /work \
+  haskell:9.10.2 bash -c "
+    apt-get update &&
+    apt-get install -y unixodbc-dev pkg-config libpq-dev &&
+    exec cabal \"\$@\"
+  " --'
+
+
+alias cabal-linux='docker run --rm -it \
+  -v "$PWD:/work" \
+  -v "$HOME/.cabal:/root/.cabal" \
+  -v "$HOME/.ghc:/root/.ghc" \
+  -v "$HOME/.cache:/root/.cache" \
+  -w /work \
+  haskell:9.10.2 bash -c "
+    apt-get update &&
+    apt-get install -y unixodbc-dev pkg-config libpq-dev &&
+    exec cabal \"\$@\"
+  " --'
+
+
+cabal-linux-arm build exe:graphql-engine
+cabal-linux-amd build exe:graphql-engine
+
+###
+Then move the built binaries to root with Dockerfile
+###
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin \
+    193988300650.dkr.ecr.us-east-1.amazonaws.com
+
+# Build and push multi-architecture image
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t 193988300650.dkr.ecr.us-east-1.amazonaws.com/agile-ats-hasura-dynamic:latest \
+  --push \
+  .
+

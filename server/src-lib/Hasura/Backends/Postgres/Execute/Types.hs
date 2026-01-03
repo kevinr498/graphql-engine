@@ -348,8 +348,6 @@ pgResolveConnectionTemplate sourceConfig (RequestContext (RequestContextHeaders 
       when (roleName == adminRoleName) $ throw400 InvalidParams "Only requests made with a non-admin context can resolve the connection template. Please try again with non-admin 'x-hasura-role' in the session context."
   resolvedTemplate <- _runResolver connectionTemplateResolver sessionVariables headers queryContext
   pure . encJFromJValue $ J.object ["result" J..= resolvedTemplate]
-  where
-    connectionTemplateNotApplicableError = throw400 NotSupported "Connection templating feature is enterprise edition only"
 
 resolvePostgresConnectionTemplate ::
   (MonadError QErr m) =>

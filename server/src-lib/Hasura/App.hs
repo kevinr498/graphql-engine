@@ -50,7 +50,7 @@ module Hasura.App
     setCatalogStateTx,
     mkHGEServer,
     mkPgSourceResolver,
-    mkMSSQLSourceResolver,
+    dummyMSSQLSourceResolver,
   )
 where
 
@@ -82,21 +82,15 @@ import Data.Set.NonEmpty qualified as NE
 import Data.Text qualified as T
 import Data.Time.Clock (UTCTime)
 import Data.Time.Clock qualified as Clock
-import Database.MSSQL.Pool qualified as MSPool
 import Database.PG.Query qualified as PG
 import Database.PG.Query qualified as Q
 import GHC.AssertNF.CPP
 import Hasura.App.State
 import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Authentication.User (ExtraUserInfo (..), UserInfo (..))
-import Hasura.Backends.MSSQL.Connection
 import Hasura.Backends.Postgres.Connection
-import Hasura.Backends.Postgres.Connection.Settings (ConnectionTemplate (..), PostgresConnectionSet, getPostgresConnectionSet)
-import Hasura.Backends.Postgres.Execute.ConnectionTemplate (resolvePostgresConnectionTemplate)
-import Hasura.Backends.Postgres.Execute.Types (ConnectionTemplateConfig (..), ConnectionTemplateResolver (..))
+import Hasura.Backends.Postgres.Execute.Types qualified as ET
 import Hasura.Base.Error
-import Kriti.Eval qualified as Kriti
-import Data.Map.Strict qualified as Map
 import Hasura.ClientCredentials (getEEClientCredentialsTx, setEEClientCredentialsTx)
 import Hasura.Eventing.Backend
 import Hasura.Eventing.Common
@@ -550,7 +544,7 @@ initialiseAppContext env serveOptions AppInit {..} = do
       env
       logger
       (mkPgSourceResolver pgLogger)
-      mkMSSQLSourceResolver
+      dummyMSSQLSourceResolver
       aiMetadataWithResourceVersion
       cacheStaticConfig
       cacheDynamicConfig
@@ -803,7 +797,7 @@ instance WS.MonadWSLog AppM where
 
 instance MonadResolveSource AppM where
   getPGSourceResolver = asks (mkPgSourceResolver . _lsPgLogger . appEnvLoggers)
-  getMSSQLSourceResolver = return mkMSSQLSourceResolver
+  getMSSQLSourceResolver = return dummyMSSQLSourceResolver
 
 instance MonadQueryTags AppM where
   createQueryTags _attributes _qtSourceConfig = return $ emptyQueryTagsComment
@@ -1515,26 +1509,6 @@ telemetryNotice =
     <> "usage stats which allows us to keep improving Hasura at warp speed. "
     <> "To read more or opt-out, visit https://hasura.io/docs/latest/graphql/core/guides/telemetry.html"
 
--- | Build connection template configuration from metadata (CE version)
-buildConnectionTemplateConfig :: 
-  Maybe ConnectionTemplate -> 
-  Maybe PostgresConnectionSet -> 
-  IO ConnectionTemplateConfig
-buildConnectionTemplateConfig Nothing _ = pure ConnTemplate_NotConfigured
-buildConnectionTemplateConfig (Just template) connectionSetMaybe = do
-  let connectionSetKeys = maybe mempty (Map.keys . getPostgresConnectionSet) connectionSetMaybe
-  pure $ ConnTemplate_Resolver 
-    (templateToKritiValue template) 
-    (ConnectionTemplateResolver $ \sessionVars headers queryCtx ->
-      resolvePostgresConnectionTemplate template connectionSetKeys sessionVars headers queryCtx)
-  where
-    -- Convert ConnectionTemplate to Kriti ValueExt (simplified for CE)
-    templateToKritiValue :: ConnectionTemplate -> Kriti.ValueExt
-    templateToKritiValue (ConnectionTemplate templateText) = 
-      case Kriti.parser templateText of
-        Right kritiValue -> kritiValue
-        Left _ -> Kriti.ValueExt mempty -- Fallback to empty template on parse error
-
 mkPgSourceResolver :: PG.PGLogger -> SourceResolver ('Postgres 'Vanilla)
 mkPgSourceResolver pgLogger env sourceName config = runExceptT do
   let PostgresSourceConnInfo urlConf poolSettings allowPrepare isoLevel _ = pccConnectionInfo config
@@ -1554,23 +1528,11 @@ mkPgSourceResolver pgLogger env sourceName config = runExceptT do
   pgPool <- liftIO $ Q.initPGPool connInfo context connParams pgLogger
   let pgExecCtx = mkPGExecCtx isoLevel pgPool NeverResizePool
   connInfoWithFinalizer <- liftIO $ mkConnInfoWithFinalizer connInfo (pure ())
-  -- Build connection template config from metadata
-  connectionTemplateConfig <- liftIO $ buildConnectionTemplateConfig (pccConnectionTemplate config) (pccConnectionSet config)
-  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer Nothing mempty (pccExtensionsSchema config) mempty connectionTemplateConfig
+  
+  -- Connection templates are handled directly in the Execute.Types module for CE
+  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer Nothing mempty (pccExtensionsSchema config) mempty ET.ConnTemplate_NotConfigured
 
-mkMSSQLSourceResolver :: SourceResolver 'MSSQL
-mkMSSQLSourceResolver env _name (MSSQLConnConfiguration connInfo _) = runExceptT do
-  let MSSQLConnectionInfo iConnString poolSettings isolationLevel = connInfo
-      connOptions = case poolSettings of
-        MSSQLPoolSettingsPool (MSSQLPoolConnectionSettings {..}) ->
-          MSPool.ConnectionOptionsPool
-            $ MSPool.PoolOptions
-              { poConnections = fromMaybe defaultMSSQLMaxConnections mpsMaxConnections,
-                poStripes = 1,
-                poIdleTime = mpsIdleTimeout
-              }
-        MSSQLPoolSettingsNoPool -> MSPool.ConnectionOptionsNoPool
-  (connString, mssqlPool) <- createMSSQLPool iConnString connOptions env
-  let mssqlExecCtx = mkMSSQLExecCtx isolationLevel mssqlPool NeverResizePool
-      numReadReplicas = 0
-  pure $ MSSQLSourceConfig connString mssqlExecCtx numReadReplicas
+-- Dummy MSSQL resolver for CE build (always returns error since MSSQL is not supported)
+dummyMSSQLSourceResolver :: SourceResolver 'MSSQL
+dummyMSSQLSourceResolver _env _name _config = 
+  pure $ Left $ err400 NotSupported "MSSQL sources are not supported in Community Edition"

@@ -430,5 +430,5 @@ constraints: any.Cabal ==3.12.0.0,
              any.xml-lens ==0.3.1,
              any.xml-types ==0.3.8,
              any.yaml ==0.11.11.2,
-             any.zlib ==0.7.1.0,
+             any.zlib >= 0.7 && < 0.8,
 index-state: hackage.haskell.org 2025-09-10T21:02:11Z

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC1091 # We do not want Shellcheck to validate that sourced scripts are present.
+export PKG_CONFIG_PATH="$(brew --prefix unixodbc)/lib/pkgconfig"
+export LIBRARY_PATH="$(brew --prefix unixodbc)/lib"
+export CPATH="$(brew --prefix unixodbc)/include"
+export DYLD_LIBRARY_PATH="$(brew --prefix unixodbc)/lib"
 
 set -euo pipefail
 shopt -s globstar

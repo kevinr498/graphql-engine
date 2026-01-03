@@ -109,7 +109,7 @@ export const ConnectPostgresWidget = (props: ConnectPostgresWidgetProps) => {
     overrideDriver === 'cockroach' ? ['connectionParams'] : [];
 
   const dynamicDBRoutingTab =
-    dataSourceName && isEditMode && window.__env.consoleType !== 'oss'
+    dataSourceName && isEditMode
       ? [
           {
             value: 'dynamicDBRouting',
@@ -120,6 +120,7 @@ export const ConnectPostgresWidget = (props: ConnectPostgresWidgetProps) => {
                   id="dynamic-db-routing"
                   title="Dynamic Routing for Databases"
                   description="Effortlessly scale your data architecture with Dynamic Routing for databases, allowing you to easily route GraphQL requests to different database connections and leverage different database topology patterns with Hasura."
+                  override={true}
                 >
                   <DynamicDBRouting sourceName={dataSourceName} />
                 </LimitedFeatureWrapper>

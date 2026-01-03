@@ -142,7 +142,7 @@ alias cabal-linux='docker run --rm -it \
   " --'
 
 
-cabal-linux-arm build exe:graphql-engine
+cabal-linux build exe:graphql-engine
 cabal-linux-amd build exe:graphql-engine
 
 ###
@@ -154,8 +154,9 @@ aws ecr get-login-password --region us-east-1 \
 
 # Build and push multi-architecture image
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+  --platform linux/arm64 \
   -t 193988300650.dkr.ecr.us-east-1.amazonaws.com/agile-ats-hasura-dynamic:latest \
   --push \
   .
 
+cabal list-bin exe:graphql-engine

@@ -8,6 +8,8 @@ module Hasura.Backends.Postgres.Execute.Types
     PGExecCtxInfo (..),
     PGExecTxType (..),
     mkPGExecCtx,
+    mkPGExecCtxWithConnectionSet,
+    selectPoolForExecution,
     mkTxErrorHandler,
     defaultTxErrorHandler,
     dmlTxErrorHandler,
@@ -38,9 +40,11 @@ import Data.Aeson.Extended qualified as J
 import Data.CaseInsensitive qualified as CI
 import Data.Has
 import Data.HashMap.Internal.Strict qualified as Map
+import Data.HashMap.Strict qualified as HashMap
 import Data.IORef (IORef)
 import Data.IORef qualified as IORef
 import Data.List.NonEmpty qualified as List.NonEmpty
+import Data.List.NonEmpty qualified as NE
 import Data.Text.Extended (toTxt)
 import Database.PG.Query qualified as PG
 import Database.PG.Query.Class ()
@@ -142,6 +146,74 @@ mkPGExecCtx defaultIsoLevel pool resizeStrategy =
             _srpsReadReplicasResized = False,
             _srpsConnectionSet = []
           }
+
+-- | Creates a Postgres execution context with connection set support
+mkPGExecCtxWithConnectionSet :: 
+  PG.TxIsolation -> 
+  PG.PGPool -> 
+  Maybe (NonEmpty PG.PGPool) -> 
+  HashMap PostgresConnectionSetMemberName PG.PGPool -> 
+  ResizePoolStrategy -> 
+  PGExecCtx
+mkPGExecCtxWithConnectionSet defaultIsoLevel primaryPool readReplicaPools connectionSetPools resizeStrategy =
+  PGExecCtx
+    { _pecDestroyConnections = do
+        -- Destroy primary pool
+        PG.destroyPGPool primaryPool
+        -- Destroy read replica pools
+        traverse_ (traverse_ PG.destroyPGPool) readReplicaPools
+        -- Destroy connection set pools
+        traverse_ PG.destroyPGPool connectionSetPools,
+      _pecResizePools = \serverReplicas ->
+        case resizeStrategy of
+          NeverResizePool -> pure noPoolsResizedSummary
+          ResizePool maxConnections -> do
+            -- Resize primary pool
+            resizePostgresPool primaryPool maxConnections serverReplicas
+            -- Resize read replica pools
+            traverse_ (traverse_ (\pool -> resizePostgresPool pool maxConnections serverReplicas)) readReplicaPools
+            -- Resize connection set pools
+            connectionSetResized <- traverse (\pool -> resizePostgresPool pool maxConnections serverReplicas >> pure True) connectionSetPools
+            pure $ SourceResizePoolSummary
+              { _srpsPrimaryResized = True,
+                _srpsReadReplicasResized = isJust readReplicaPools,
+                _srpsConnectionSet = map toTxt $ HashMap.keys connectionSetResized
+              },
+      _pecRunTx = \pgExecCtxInfo -> 
+        let selectedPool = selectPoolForExecution pgExecCtxInfo primaryPool readReplicaPools connectionSetPools
+        in case pgExecCtxInfo of
+          (PGExecCtxInfo NoTxRead _) -> PG.runTx' selectedPool
+          (PGExecCtxInfo NoTxReadWrite _) -> PG.runTx' selectedPool
+          (PGExecCtxInfo (Tx txAccess (Just isolationLevel)) _) -> PG.runTx selectedPool (isolationLevel, Just txAccess)
+          (PGExecCtxInfo (Tx txAccess Nothing) _) -> PG.runTx selectedPool (defaultIsoLevel, Just txAccess)
+    }
+
+-- | Select the appropriate connection pool based on the execution context
+selectPoolForExecution :: 
+  PGExecCtxInfo -> 
+  PG.PGPool -> 
+  Maybe (NonEmpty PG.PGPool) -> 
+  HashMap PostgresConnectionSetMemberName PG.PGPool -> 
+  PG.PGPool
+selectPoolForExecution (PGExecCtxInfo txType pgExecFrom) primaryPool readReplicaPools connectionSetPools =
+  case pgExecFrom of
+    GraphQLQuery (Just resolvedTemplate) -> 
+      case resolvedTemplate of
+        PCTOPrimary _ -> primaryPool
+        PCTODefault _ -> 
+          -- For read operations, prefer read replicas if available
+          case (txType, readReplicaPools) of
+            (NoTxRead, Just replicas) -> NE.head replicas
+            _ -> primaryPool
+        PCTOReadReplicas _ -> 
+          case readReplicaPools of
+            Just replicas -> NE.head replicas
+            Nothing -> primaryPool -- Fallback to primary if no read replicas
+        PCTOConnectionSet memberName -> 
+          case HashMap.lookup memberName connectionSetPools of
+            Just pool -> pool
+            Nothing -> primaryPool -- Fallback to primary if connection set member not found
+    _ -> primaryPool -- Default to primary for non-GraphQL queries
 
 -- | Resize Postgres pool by setting the number of connections equal to
 -- allowed maximum connections across all server instances divided by

@@ -78,6 +78,7 @@ import Data.ByteString.Lazy.Char8 qualified as BLC
 import Data.Environment qualified as Env
 import Data.FileEmbed (makeRelativeToProject)
 import Data.HashMap.Strict qualified as HashMap
+import Data.HashMap.Strict.NonEmpty qualified as NEMap
 import Data.Set.NonEmpty qualified as NE
 import Data.Text qualified as T
 import Data.Time.Clock (UTCTime)
@@ -89,6 +90,8 @@ import Hasura.App.State
 import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Authentication.User (ExtraUserInfo (..), UserInfo (..))
 import Hasura.Backends.Postgres.Connection
+import Hasura.Backends.Postgres.Connection.Settings (PostgresConnectionSet (..), PostgresConnectionSetMember (..), PostgresConnectionSetMemberName, getPostgresConnectionSet, ConnectionTemplate (..), KritiTemplate (..))
+import Hasura.Backends.Postgres.Execute.ConnectionTemplate (makeRequestContext)
 import Hasura.Backends.Postgres.Execute.Types qualified as ET
 import Hasura.Base.Error
 import Hasura.ClientCredentials (getEEClientCredentialsTx, setEEClientCredentialsTx)
@@ -1526,11 +1529,56 @@ mkPgSourceResolver pgLogger env sourceName config = runExceptT do
           }
   let context = J.object [("source" J..= sourceName)]
   pgPool <- liftIO $ Q.initPGPool connInfo context connParams pgLogger
-  let pgExecCtx = mkPGExecCtx isoLevel pgPool NeverResizePool
+  
+  -- Process connection set if configured
+  (connectionSetPools, connectionSetConnInfos) <- case pccConnectionSet config of
+    Nothing -> pure (mempty, mempty)
+    Just connectionSet -> do
+      let connectionSetMembers = NEMap.elems $ getPostgresConnectionSet connectionSet
+      connectionSetData <- traverse (createConnectionSetMemberPool pgLogger env) connectionSetMembers
+      let pools = HashMap.fromList $ map (\(name, pool, _) -> (name, pool)) connectionSetData
+          connInfos = HashMap.fromList $ map (\(name, _, connInfo) -> (name, connInfo)) connectionSetData
+      pure (pools, connInfos)
+  
+  -- Create connection set-aware execution context
+  let pgExecCtx = if HashMap.null connectionSetPools
+        then mkPGExecCtx isoLevel pgPool NeverResizePool
+        else mkPGExecCtxWithConnectionSet isoLevel pgPool Nothing connectionSetPools NeverResizePool
+  
   connInfoWithFinalizer <- liftIO $ mkConnInfoWithFinalizer connInfo (pure ())
   
-  -- Connection templates are handled directly in the Execute.Types module for CE
-  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer Nothing mempty (pccExtensionsSchema config) mempty ET.ConnTemplate_NotConfigured
+  -- Configure connection template if present
+  let connectionTemplateConfig = case pccConnectionTemplate config of
+        Nothing -> ET.ConnTemplate_NotConfigured
+        Just template -> ET.ConnTemplate_Resolver (ktParsedAST $ ctTemplate template) $ ET.ConnectionTemplateResolver $ \sessionVars headers queryContext -> do
+          let requestContext = makeRequestContext queryContext headers sessionVars
+              connectionSetMemberNames = HashMap.keys connectionSetPools
+          ET.resolvePostgresConnectionTemplate template connectionSetMemberNames sessionVars headers queryContext
+  
+  pure $ PGSourceConfig pgExecCtx connInfoWithFinalizer Nothing mempty (pccExtensionsSchema config) connectionSetConnInfos connectionTemplateConfig
+
+-- | Create a connection pool for a connection set member
+createConnectionSetMemberPool :: 
+  PG.PGLogger -> 
+  Env.Environment -> 
+  PostgresConnectionSetMember -> 
+  ExceptT QErr IO (PostgresConnectionSetMemberName, PG.PGPool, PG.ConnInfo)
+createConnectionSetMemberPool pgLogger env (PostgresConnectionSetMember memberName memberConnInfo) = do
+  let PostgresSourceConnInfo urlConf poolSettings allowPrepare isoLevel _ = memberConnInfo
+  let (maxConns, idleTimeout, retries, connLifetime) = getDefaultPGPoolSettingIfNotExists poolSettings defaultPostgresPoolSettings
+  connDetails <- resolveUrlConf env urlConf
+  let connInfo = PG.ConnInfo retries connDetails
+      connParams =
+        PG.defaultConnParams
+          { PG.cpIdleTime = idleTimeout,
+            PG.cpConns = maxConns,
+            PG.cpAllowPrepare = allowPrepare,
+            PG.cpMbLifetime = connLifetime,
+            PG.cpTimeout = ppsPoolTimeout =<< poolSettings
+          }
+  let context = J.object [("connection_set_member" J..= memberName)]
+  pool <- liftIO $ Q.initPGPool connInfo context connParams pgLogger
+  pure (memberName, pool, connInfo)
 
 -- Dummy MSSQL resolver for CE build (always returns error since MSSQL is not supported)
 dummyMSSQLSourceResolver :: SourceResolver 'MSSQL
